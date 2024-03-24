@@ -1,0 +1,106 @@
+definitions:
+  app.Response:
+    properties:
+      code:
+        type: integer
+      data: {}
+      msg:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: An example of gin
+  termsOfService: https://github.com/vitorbarbarisi/story-api
+  title: Story API
+  version: "1.0"
+paths:
+  /api/stories:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/app.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/app.Response'
+      summary: Get all stories
+    post:
+      parameters:
+      - description: Id
+        in: body
+        name: id
+        required: true
+        schema:
+          type: integer
+      - description: Name
+        in: body
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: StoryScore
+        in: body
+        name: story_score
+        required: true
+        schema:
+          type: integer
+      - description: ConfidenceLevel
+        in: body
+        name: confidence_level
+        schema:
+          type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/app.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/app.Response'
+      summary: Add story
+  /api/stories/{id}:
+    put:
+      parameters:
+      - description: Id
+        in: body
+        name: id
+        required: true
+        schema:
+          type: integer
+      - description: Name
+        in: body
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: StoryScore
+        in: body
+        name: story_score
+        required: true
+        schema:
+          type: integer
+      - description: ConfidenceLevel
+        in: body
+        name: confidence_level
+        schema:
+          type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/app.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/app.Response'
+      summary: Update story
+swagger: "2.0"
