@@ -206,9 +206,8 @@ EOF
         print_info "Adicione ~/bin ao seu PATH para usar o comando em qualquer lugar:"
         print_info "  echo 'export PATH=\"\$HOME/bin:\$PATH\"' >> ~/.zshrc"
     else
-        sudo mv "$CONTROL_SCRIPT" "/usr/local/bin/story-api-control"
-        sudo chmod +x "/usr/local/bin/story-api-control"
-        print_info "Script de controle criado: /usr/local/bin/story-api-control"
+        chmod +x "$CONTROL_SCRIPT"
+        print_info "Script de controle criado: $CONTROL_SCRIPT"
     fi
 }
 
