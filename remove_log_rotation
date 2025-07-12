@@ -1,0 +1,151 @@
+#!/bin/bash
+
+# Script para remover configuração de rotação e limpeza de logs
+# Compatível com Linux e macOS
+
+set -e
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Detectar sistema operacional
+OS="$(uname -s)"
+USER_NAME="$(whoami)"
+USER_HOME="$(eval echo ~$USER_NAME)"
+
+# Funções auxiliares
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Verificar privilégios
+check_privileges() {
+    if [[ "$OS" == "Linux" ]]; then
+        if [[ $EUID -ne 0 ]]; then
+           print_error "Este script deve ser executado como root (use sudo)"
+           exit 1
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Executando no macOS"
+    fi
+}
+
+# Remover configuração do Linux
+remove_linux_config() {
+    print_info "Removendo configuração do Linux..."
+    
+    # Remover configurações do logrotate
+    if [[ -f "/etc/logrotate.d/story-api-docker" ]]; then
+        rm -f "/etc/logrotate.d/story-api-docker"
+        print_info "✓ Removido: /etc/logrotate.d/story-api-docker"
+    fi
+    
+    if [[ -f "/etc/logrotate.d/story-api-systemd" ]]; then
+        rm -f "/etc/logrotate.d/story-api-systemd"
+        print_info "✓ Removido: /etc/logrotate.d/story-api-systemd"
+    fi
+    
+    # Remover script de limpeza
+    if [[ -f "/usr/local/bin/cleanup-story-api-docker" ]]; then
+        rm -f "/usr/local/bin/cleanup-story-api-docker"
+        print_info "✓ Removido: /usr/local/bin/cleanup-story-api-docker"
+    fi
+    
+    # Remover cron jobs
+    if crontab -l 2>/dev/null | grep -q "cleanup-story-api"; then
+        crontab -l 2>/dev/null | grep -v "cleanup-story-api" | crontab -
+        print_info "✓ Removidos: cron jobs do story-api"
+    fi
+    
+    # Restaurar configuração do Docker daemon
+    if [[ -f "/etc/docker/daemon.json.backup"* ]]; then
+        BACKUP_FILE=$(ls -t /etc/docker/daemon.json.backup* | head -1)
+        cp "$BACKUP_FILE" "/etc/docker/daemon.json"
+        print_info "✓ Restaurado: /etc/docker/daemon.json"
+        print_warning "Reinicie o Docker para aplicar as configurações: sudo systemctl restart docker"
+    fi
+}
+
+# Remover configuração do macOS
+remove_macos_config() {
+    print_info "Removendo configuração do macOS..."
+    
+    # Remover LaunchAgent
+    if [[ -f "$USER_HOME/Library/LaunchAgents/com.story-api.logrotate.plist" ]]; then
+        launchctl unload "$USER_HOME/Library/LaunchAgents/com.story-api.logrotate.plist" 2>/dev/null || true
+        rm -f "$USER_HOME/Library/LaunchAgents/com.story-api.logrotate.plist"
+        print_info "✓ Removido: LaunchAgent de rotação de logs"
+    fi
+    
+    # Remover scripts de limpeza
+    if [[ -f "$USER_HOME/bin/cleanup-story-api-logs" ]]; then
+        rm -f "$USER_HOME/bin/cleanup-story-api-logs"
+        print_info "✓ Removido: $USER_HOME/bin/cleanup-story-api-logs"
+    fi
+    
+    if [[ -f "$USER_HOME/bin/cleanup-story-api-docker" ]]; then
+        rm -f "$USER_HOME/bin/cleanup-story-api-docker"
+        print_info "✓ Removido: $USER_HOME/bin/cleanup-story-api-docker"
+    fi
+    
+    # Remover diretório bin se estiver vazio
+    if [[ -d "$USER_HOME/bin" ]] && [[ -z "$(ls -A "$USER_HOME/bin")" ]]; then
+        rmdir "$USER_HOME/bin"
+        print_info "✓ Removido: diretório ~/bin (estava vazio)"
+    fi
+}
+
+# Função principal
+main() {
+    print_info "=== Removendo Configuração de Rotação de Logs ==="
+    print_info "Sistema operacional detectado: $OS"
+    
+    # Confirmar ação
+    echo
+    read -p "Tem certeza que deseja remover todas as configurações de rotação de logs? (y/N): " -n 1 -r
+    echo
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Operação cancelada pelo usuário."
+        exit 0
+    fi
+    
+    check_privileges
+    
+    if [[ "$OS" == "Linux" ]]; then
+        remove_linux_config
+    elif [[ "$OS" == "Darwin" ]]; then
+        remove_macos_config
+    else
+        print_error "Sistema operacional não suportado: $OS"
+        exit 1
+    fi
+    
+    print_info "=== Remoção concluída! ==="
+    print_info ""
+    print_info "Todas as configurações de rotação de logs foram removidas."
+    print_info "Os logs existentes não foram removidos."
+    print_info ""
+    
+    if [[ "$OS" == "Linux" ]]; then
+        print_info "Para completar a remoção no Linux:"
+        print_info "  sudo systemctl restart docker  # Se necessário"
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Para completar a remoção no macOS:"
+        print_info "  Remova manualmente as configurações do Docker Desktop se desejar"
+    fi
+}
+
+# Executar função principal
+main "$@" 

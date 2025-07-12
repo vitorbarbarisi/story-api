@@ -1,0 +1,367 @@
+#!/bin/bash
+
+# Script para configurar rotação e limpeza automática de logs
+# Compatível com Linux e macOS
+
+set -e
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Detectar sistema operacional
+OS="$(uname -s)"
+USER_NAME="$(whoami)"
+USER_HOME="$(eval echo ~$USER_NAME)"
+
+# Funções auxiliares
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Verificar privilégios
+check_privileges() {
+    if [[ "$OS" == "Linux" ]]; then
+        if [[ $EUID -ne 0 ]]; then
+           print_error "Este script deve ser executado como root (use sudo)"
+           exit 1
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Executando no macOS"
+    fi
+}
+
+# Obter diretório do projeto
+get_project_dir() {
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    PROJECT_DIR="$SCRIPT_DIR"
+    
+    if [[ ! -f "$PROJECT_DIR/docker-compose.yml" ]]; then
+        print_error "Arquivo docker-compose.yml não encontrado em $PROJECT_DIR"
+        exit 1
+    fi
+    
+    print_info "Diretório do projeto: $PROJECT_DIR"
+}
+
+# Configurar logrotate para Docker no Linux
+configure_docker_logrotate_linux() {
+    print_info "Configurando logrotate para Docker no Linux..."
+    
+    # Criar configuração para logs do Docker Compose
+    cat > /etc/logrotate.d/story-api-docker << 'EOF'
+# Rotação de logs do Docker Compose - Story API
+/var/lib/docker/containers/*/*-json.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 0644 root root
+    postrotate
+        /bin/kill -USR1 $(cat /var/run/docker.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}
+
+# Logs específicos do projeto Story API
+/var/log/story-api/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 0644 root root
+    copytruncate
+}
+EOF
+
+    print_info "Configuração do logrotate criada: /etc/logrotate.d/story-api-docker"
+}
+
+# Configurar logrotate para systemd no Linux
+configure_systemd_logrotate_linux() {
+    print_info "Configurando logrotate para systemd no Linux..."
+    
+    # Criar configuração para logs do systemd
+    cat > /etc/logrotate.d/story-api-systemd << 'EOF'
+# Rotação de logs do systemd - Story API
+/var/log/story-api-systemd.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0644 root root
+    copytruncate
+}
+EOF
+
+    print_info "Configuração do logrotate systemd criada: /etc/logrotate.d/story-api-systemd"
+}
+
+# Configurar rotação de logs no macOS
+configure_macos_log_rotation() {
+    print_info "Configurando rotação de logs no macOS..."
+    
+    # Criar diretório para logs se não existir
+    mkdir -p "$USER_HOME/Library/Logs"
+    
+    # Criar script de limpeza de logs
+    CLEANUP_SCRIPT="$USER_HOME/bin/cleanup-story-api-logs"
+    mkdir -p "$USER_HOME/bin"
+    
+    cat > "$CLEANUP_SCRIPT" << EOF
+#!/bin/bash
+# Script de limpeza automática de logs - Story API macOS
+
+LOG_DIR="$USER_HOME/Library/Logs"
+PROJECT_DIR="$PROJECT_DIR"
+
+# Rotacionar logs do launchd
+if [[ -f "\$LOG_DIR/story-api.log" ]]; then
+    if [[ \$(stat -f%z "\$LOG_DIR/story-api.log" 2>/dev/null) -gt 10485760 ]]; then # 10MB
+        mv "\$LOG_DIR/story-api.log" "\$LOG_DIR/story-api.log.1"
+        gzip "\$LOG_DIR/story-api.log.1"
+        touch "\$LOG_DIR/story-api.log"
+    fi
+fi
+
+if [[ -f "\$LOG_DIR/story-api-error.log" ]]; then
+    if [[ \$(stat -f%z "\$LOG_DIR/story-api-error.log" 2>/dev/null) -gt 10485760 ]]; then # 10MB
+        mv "\$LOG_DIR/story-api-error.log" "\$LOG_DIR/story-api-error.log.1"
+        gzip "\$LOG_DIR/story-api-error.log.1"
+        touch "\$LOG_DIR/story-api-error.log"
+    fi
+fi
+
+# Limpar logs antigos (manter apenas 7 dias)
+find "\$LOG_DIR" -name "story-api*.log.*.gz" -mtime +7 -delete 2>/dev/null || true
+
+# Limpar logs do Docker se muito grandes
+if command -v docker >/dev/null 2>&1; then
+    docker system prune --filter "until=168h" --force 2>/dev/null || true
+fi
+
+echo "\$(date): Limpeza de logs concluída"
+EOF
+
+    chmod +x "$CLEANUP_SCRIPT"
+    print_info "Script de limpeza criado: $CLEANUP_SCRIPT"
+    
+    # Criar LaunchAgent para execução automática
+    PLIST_FILE="$USER_HOME/Library/LaunchAgents/com.story-api.logrotate.plist"
+    
+    cat > "$PLIST_FILE" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.story-api.logrotate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$CLEANUP_SCRIPT</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>86400</integer>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+EOF
+
+    print_info "LaunchAgent criado: $PLIST_FILE"
+    launchctl load "$PLIST_FILE"
+    print_info "LaunchAgent carregado para execução diária"
+}
+
+# Configurar Docker daemon para limitar logs
+configure_docker_daemon() {
+    print_info "Configurando Docker daemon para limitar logs..."
+    
+    if [[ "$OS" == "Linux" ]]; then
+        DOCKER_DAEMON_FILE="/etc/docker/daemon.json"
+        
+        # Backup se existir
+        if [[ -f "$DOCKER_DAEMON_FILE" ]]; then
+            cp "$DOCKER_DAEMON_FILE" "$DOCKER_DAEMON_FILE.backup.$(date +%Y%m%d_%H%M%S)"
+        fi
+        
+        # Criar/atualizar configuração
+        cat > "$DOCKER_DAEMON_FILE" << 'EOF'
+{
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+    }
+}
+EOF
+        
+        print_info "Configuração do Docker daemon criada: $DOCKER_DAEMON_FILE"
+        print_warning "Será necessário reiniciar o Docker para aplicar as configurações"
+        
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "No macOS, configure o Docker Desktop manualmente:"
+        print_info "  1. Abra Docker Desktop"
+        print_info "  2. Vá em Settings > Docker Engine"
+        print_info "  3. Adicione a configuração de logs:"
+        print_info '     "log-driver": "json-file",'
+        print_info '     "log-opts": {'
+        print_info '       "max-size": "10m",'
+        print_info '       "max-file": "3"'
+        print_info '     }'
+    fi
+}
+
+# Criar configuração de limpeza do Docker Compose
+create_docker_compose_cleanup() {
+    print_info "Criando configuração de limpeza do Docker Compose..."
+    
+    if [[ "$OS" == "Darwin" ]]; then
+        CLEANUP_SCRIPT="$USER_HOME/bin/cleanup-story-api-docker"
+    else
+        CLEANUP_SCRIPT="/usr/local/bin/cleanup-story-api-docker"
+    fi
+    
+    cat > "$CLEANUP_SCRIPT" << EOF
+#!/bin/bash
+# Script de limpeza do Docker - Story API
+
+cd "$PROJECT_DIR"
+
+# Limpar containers parados
+docker container prune --force
+
+# Limpar imagens não utilizadas
+docker image prune --force
+
+# Limpar volumes não utilizados
+docker volume prune --force
+
+# Limpar networks não utilizadas
+docker network prune --force
+
+# Limpar build cache
+docker builder prune --force
+
+echo "\$(date): Limpeza do Docker concluída"
+EOF
+
+    chmod +x "$CLEANUP_SCRIPT"
+    print_info "Script de limpeza Docker criado: $CLEANUP_SCRIPT"
+}
+
+# Configurar cron job para limpeza automática (Linux)
+configure_cron_linux() {
+    print_info "Configurando cron job para limpeza automática..."
+    
+    # Criar entrada no crontab
+    (crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/cleanup-story-api-docker >/dev/null 2>&1") | crontab -
+    (crontab -l 2>/dev/null; echo "0 3 * * 0 docker system prune --force >/dev/null 2>&1") | crontab -
+    
+    print_info "Cron jobs configurados:"
+    print_info "  - Limpeza diária às 02:00"
+    print_info "  - Limpeza semanal do sistema Docker às 03:00 (domingo)"
+}
+
+# Testar configuração
+test_configuration() {
+    print_info "Testando configuração..."
+    
+    if [[ "$OS" == "Linux" ]]; then
+        # Testar logrotate
+        if command -v logrotate >/dev/null 2>&1; then
+            logrotate -d /etc/logrotate.d/story-api-docker
+            print_info "✓ Configuração do logrotate testada"
+        else
+            print_warning "logrotate não está instalado"
+        fi
+        
+        # Testar cron
+        if crontab -l | grep -q "cleanup-story-api"; then
+            print_info "✓ Cron jobs configurados"
+        else
+            print_warning "Problema com cron jobs"
+        fi
+        
+    elif [[ "$OS" == "Darwin" ]]; then
+        # Testar LaunchAgent
+        if launchctl list | grep -q "com.story-api.logrotate"; then
+            print_info "✓ LaunchAgent configurado"
+        else
+            print_warning "Problema com LaunchAgent"
+        fi
+    fi
+}
+
+# Função principal
+main() {
+    print_info "=== Configurando Rotação e Limpeza de Logs ==="
+    print_info "Sistema operacional detectado: $OS"
+    
+    check_privileges
+    get_project_dir
+    configure_docker_daemon
+    create_docker_compose_cleanup
+    
+    if [[ "$OS" == "Linux" ]]; then
+        configure_docker_logrotate_linux
+        configure_systemd_logrotate_linux
+        configure_cron_linux
+    elif [[ "$OS" == "Darwin" ]]; then
+        configure_macos_log_rotation
+    else
+        print_error "Sistema operacional não suportado: $OS"
+        exit 1
+    fi
+    
+    test_configuration
+    
+    print_info "=== Configuração concluída! ==="
+    print_info ""
+    print_info "Configurações aplicadas:"
+    
+    if [[ "$OS" == "Linux" ]]; then
+        print_info "  ✓ Logrotate configurado para Docker e systemd"
+        print_info "  ✓ Cron jobs para limpeza automática"
+        print_info "  ✓ Docker daemon configurado com limites de log"
+        print_info ""
+        print_info "Comandos úteis:"
+        print_info "  sudo logrotate -f /etc/logrotate.d/story-api-docker  # Forçar rotação"
+        print_info "  sudo /usr/local/bin/cleanup-story-api-docker        # Limpeza manual"
+        print_info "  sudo systemctl restart docker                       # Aplicar config Docker"
+        
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "  ✓ LaunchAgent configurado para limpeza diária"
+        print_info "  ✓ Scripts de limpeza automática"
+        print_info "  ✓ Configuração de logs sugerida para Docker Desktop"
+        print_info ""
+        print_info "Comandos úteis:"
+        print_info "  ~/bin/cleanup-story-api-logs                        # Limpeza manual de logs"
+        print_info "  ~/bin/cleanup-story-api-docker                      # Limpeza manual do Docker"
+        print_info "  launchctl list | grep story-api                     # Ver status dos serviços"
+    fi
+    
+    print_info ""
+    print_info "Políticas de rotação configuradas:"
+    print_info "  - Logs do Docker: máximo 10MB por arquivo, 3 arquivos"
+    print_info "  - Logs do sistema: rotação diária, manter 7-30 dias"
+    print_info "  - Limpeza automática: containers, imagens e volumes não utilizados"
+}
+
+# Executar função principal
+main "$@" 
