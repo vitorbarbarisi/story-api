@@ -1,0 +1,431 @@
+#!/bin/bash
+
+# Script para configurar auto-start do Story API
+# Compatível com docker-compose e docker compose
+# Suporta Linux (systemd) e macOS (launchd)
+
+set -e
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Detectar sistema operacional
+OS="$(uname -s)"
+USER_NAME="$(whoami)"
+USER_HOME="$(eval echo ~$USER_NAME)"
+
+# Funções auxiliares
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Verificar privilégios baseado no OS
+check_privileges() {
+    if [[ "$OS" == "Linux" ]]; then
+        if [[ $EUID -ne 0 ]]; then
+           print_error "Este script deve ser executado como root (use sudo)"
+           exit 1
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Executando no macOS - alguns comandos podem solicitar senha"
+    fi
+}
+
+# Detectar qual versão do Docker Compose está disponível
+detect_docker_compose() {
+    if command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+        DOCKER_COMPOSE_PATH="$(which docker-compose)"
+        print_info "Detectado: docker-compose (versão legacy) em $DOCKER_COMPOSE_PATH"
+    elif docker compose version &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker compose"
+        DOCKER_COMPOSE_PATH="$(which docker)"
+        print_info "Detectado: docker compose (versão plugin) em $DOCKER_COMPOSE_PATH"
+    else
+        print_error "Docker Compose não encontrado. Instale docker-compose ou docker compose plugin"
+        exit 1
+    fi
+}
+
+# Verificar se o Docker está instalado e rodando
+check_docker() {
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker não está instalado"
+        exit 1
+    fi
+    
+    if [[ "$OS" == "Linux" ]]; then
+        if ! systemctl is-active --quiet docker; then
+            print_info "Iniciando Docker service..."
+            systemctl start docker
+            systemctl enable docker
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        # No macOS, verificar se o Docker Desktop está rodando
+        if ! docker info &> /dev/null; then
+            print_warning "Docker não está rodando. Certifique-se de que o Docker Desktop está iniciado."
+            print_info "Tentando aguardar o Docker ficar disponível..."
+            for i in {1..30}; do
+                if docker info &> /dev/null; then
+                    break
+                fi
+                sleep 2
+            done
+            if ! docker info &> /dev/null; then
+                print_error "Docker não está disponível. Inicie o Docker Desktop e tente novamente."
+                exit 1
+            fi
+        fi
+    fi
+}
+
+# Obter diretório do projeto
+get_project_dir() {
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    PROJECT_DIR="$SCRIPT_DIR"
+    
+    if [[ ! -f "$PROJECT_DIR/docker-compose.yml" ]]; then
+        print_error "Arquivo docker-compose.yml não encontrado em $PROJECT_DIR"
+        exit 1
+    fi
+    
+    print_info "Diretório do projeto: $PROJECT_DIR"
+}
+
+# Criar script de controle
+create_control_script() {
+    if [[ "$OS" == "Darwin" ]]; then
+        CONTROL_SCRIPT="$USER_HOME/bin/story-api-control"
+        mkdir -p "$USER_HOME/bin"
+    else
+        CONTROL_SCRIPT="/usr/local/bin/story-api-control"
+    fi
+    
+    cat > "$CONTROL_SCRIPT" << EOF
+#!/bin/bash
+# Script de controle para Story API
+
+PROJECT_DIR="$PROJECT_DIR"
+DOCKER_COMPOSE_CMD="$DOCKER_COMPOSE_CMD"
+DOCKER_COMPOSE_PATH="$DOCKER_COMPOSE_PATH"
+OS="$OS"
+
+case "\$1" in
+    start)
+        echo "Iniciando Story API..."
+        cd "\$PROJECT_DIR"
+        if [[ "\$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+            \$DOCKER_COMPOSE_PATH up -d
+        else
+            \$DOCKER_COMPOSE_PATH compose up -d
+        fi
+        if [[ "\$OS" == "Darwin" ]]; then
+            launchctl start com.story-api
+        elif [[ "\$OS" == "Linux" ]]; then
+            sudo systemctl start story-api.service
+        fi
+        ;;
+    stop)
+        echo "Parando Story API..."
+        cd "\$PROJECT_DIR"
+        if [[ "\$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+            \$DOCKER_COMPOSE_PATH down
+        else
+            \$DOCKER_COMPOSE_PATH compose down
+        fi
+        if [[ "\$OS" == "Darwin" ]]; then
+            launchctl stop com.story-api
+        elif [[ "\$OS" == "Linux" ]]; then
+            sudo systemctl stop story-api.service
+        fi
+        ;;
+    restart)
+        echo "Reiniciando Story API..."
+        cd "\$PROJECT_DIR"
+        if [[ "\$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+            \$DOCKER_COMPOSE_PATH restart
+        else
+            \$DOCKER_COMPOSE_PATH compose restart
+        fi
+        if [[ "\$OS" == "Darwin" ]]; then
+            launchctl stop com.story-api
+            launchctl start com.story-api
+        elif [[ "\$OS" == "Linux" ]]; then
+            sudo systemctl restart story-api.service
+        fi
+        ;;
+    status)
+        echo "Status do Story API:"
+        cd "\$PROJECT_DIR"
+        if [[ "\$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+            \$DOCKER_COMPOSE_PATH ps
+        else
+            \$DOCKER_COMPOSE_PATH compose ps
+        fi
+        if [[ "\$OS" == "Darwin" ]]; then
+            launchctl list | grep story-api
+        elif [[ "\$OS" == "Linux" ]]; then
+            sudo systemctl status story-api.service
+        fi
+        ;;
+    logs)
+        echo "Logs do Story API:"
+        cd "\$PROJECT_DIR"
+        if [[ "\$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+            \$DOCKER_COMPOSE_PATH logs -f
+        else
+            \$DOCKER_COMPOSE_PATH compose logs -f
+        fi
+        if [[ "\$OS" == "Darwin" ]]; then
+            echo "Logs do sistema (macOS):"
+            echo "Saída: ~/Library/Logs/story-api.log"
+            echo "Erros: ~/Library/Logs/story-api-error.log"
+        fi
+        ;;
+    *)
+        echo "Uso: \$0 {start|stop|restart|status|logs}"
+        exit 1
+        ;;
+esac
+EOF
+
+    if [[ "$OS" == "Darwin" ]]; then
+        chmod +x "$CONTROL_SCRIPT"
+        print_info "Script de controle criado: $CONTROL_SCRIPT"
+        print_info "Adicione ~/bin ao seu PATH para usar o comando em qualquer lugar:"
+        print_info "  echo 'export PATH=\"\$HOME/bin:\$PATH\"' >> ~/.zshrc"
+    else
+        sudo mv "$CONTROL_SCRIPT" "/usr/local/bin/story-api-control"
+        sudo chmod +x "/usr/local/bin/story-api-control"
+        print_info "Script de controle criado: /usr/local/bin/story-api-control"
+    fi
+}
+
+# Criar serviço Linux (systemd)
+create_linux_service() {
+    SERVICE_FILE="/etc/systemd/system/story-api.service"
+    
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=Story API Docker Compose Service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$PROJECT_DIR
+ExecStart=$DOCKER_COMPOSE_CMD up -d
+ExecStop=$DOCKER_COMPOSE_CMD down
+ExecReload=$DOCKER_COMPOSE_CMD restart
+TimeoutStartSec=0
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    print_info "Serviço systemd criado: $SERVICE_FILE"
+}
+
+# Criar serviço macOS (launchd)
+create_macos_service() {
+    PLIST_FILE="$USER_HOME/Library/LaunchAgents/com.story-api.plist"
+    
+    # Criar diretório se não existir
+    mkdir -p "$USER_HOME/Library/LaunchAgents"
+    
+    # Preparar comando baseado na versão do Docker Compose
+    if [[ "$DOCKER_COMPOSE_CMD" == "docker-compose" ]]; then
+        LAUNCH_CMD="cd '$PROJECT_DIR' && $DOCKER_COMPOSE_PATH up -d"
+    else
+        LAUNCH_CMD="cd '$PROJECT_DIR' && $DOCKER_COMPOSE_PATH compose up -d"
+    fi
+    
+    cat > "$PLIST_FILE" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.story-api</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>$LAUNCH_CMD</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>WorkingDirectory</key>
+    <string>$PROJECT_DIR</string>
+    <key>StandardOutPath</key>
+    <string>$USER_HOME/Library/Logs/story-api.log</string>
+    <key>StandardErrorPath</key>
+    <string>$USER_HOME/Library/Logs/story-api-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    print_info "Serviço launchd criado: $PLIST_FILE"
+}
+
+# Configurar network se necessário
+setup_network() {
+    print_info "Verificando network edu_tw_network..."
+    
+    if ! docker network ls | grep -q "edu_tw_network"; then
+        print_info "Criando network edu_tw_network..."
+        docker network create edu_tw_network
+    else
+        print_info "Network edu_tw_network já existe"
+    fi
+}
+
+# Configurar serviço baseado no OS
+configure_service() {
+    if [[ "$OS" == "Linux" ]]; then
+        print_info "Configurando serviço systemd..."
+        systemctl daemon-reload
+        systemctl enable story-api.service
+        print_info "Serviço story-api habilitado para inicialização automática"
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Configurando serviço launchd..."
+        launchctl load "$USER_HOME/Library/LaunchAgents/com.story-api.plist"
+        print_info "Serviço story-api habilitado para inicialização automática"
+    fi
+}
+
+# Testar o serviço
+test_service() {
+    print_info "Testando o serviço..."
+    
+    # Parar containers se estiverem rodando
+    cd "$PROJECT_DIR"
+    $DOCKER_COMPOSE_CMD down &> /dev/null || true
+    
+    if [[ "$OS" == "Linux" ]]; then
+        # Testar start via systemd
+        systemctl start story-api.service
+        sleep 10
+        
+        # Verificar se os containers estão rodando
+        if systemctl is-active --quiet story-api.service; then
+            print_info "✓ Serviço iniciado com sucesso"
+            cd "$PROJECT_DIR"
+            $DOCKER_COMPOSE_CMD ps
+        else
+            print_error "✗ Falha ao iniciar o serviço"
+            systemctl status story-api.service
+            exit 1
+        fi
+    elif [[ "$OS" == "Darwin" ]]; then
+        # Testar start via launchd
+        launchctl start com.story-api
+        sleep 10
+        
+        # Verificar se os containers estão rodando
+        cd "$PROJECT_DIR"
+        if $DOCKER_COMPOSE_CMD ps | grep -q "Up"; then
+            print_info "✓ Serviço iniciado com sucesso"
+            $DOCKER_COMPOSE_CMD ps
+        else
+            print_error "✗ Falha ao iniciar o serviço"
+            print_info "Verificando logs..."
+            if [[ -f "$USER_HOME/Library/Logs/story-api-error.log" ]]; then
+                cat "$USER_HOME/Library/Logs/story-api-error.log"
+            fi
+            exit 1
+        fi
+    fi
+}
+
+# Função principal
+main() {
+    print_info "=== Configurando Auto-Start do Story API ==="
+    print_info "Sistema operacional detectado: $OS"
+    
+    check_privileges
+    detect_docker_compose
+    check_docker
+    get_project_dir
+    setup_network
+    create_control_script
+    
+    # Criar serviço apropriado para o OS
+    if [[ "$OS" == "Linux" ]]; then
+        create_linux_service
+    elif [[ "$OS" == "Darwin" ]]; then
+        create_macos_service
+    else
+        print_error "Sistema operacional não suportado: $OS"
+        exit 1
+    fi
+    
+    configure_service
+    test_service
+    
+    print_info "=== Configuração concluída! ==="
+    print_info ""
+    
+    if [[ "$OS" == "Linux" ]]; then
+        print_info "Comandos disponíveis (Linux):"
+        print_info "  sudo systemctl start story-api    # Iniciar serviço"
+        print_info "  sudo systemctl stop story-api     # Parar serviço"
+        print_info "  sudo systemctl status story-api   # Ver status"
+        print_info "  sudo systemctl restart story-api  # Reiniciar serviço"
+    elif [[ "$OS" == "Darwin" ]]; then
+        print_info "Comandos disponíveis (macOS):"
+        print_info "  launchctl start com.story-api     # Iniciar serviço"
+        print_info "  launchctl stop com.story-api      # Parar serviço"
+        print_info "  launchctl list | grep story-api   # Ver status"
+        print_info "  launchctl unload ~/Library/LaunchAgents/com.story-api.plist  # Desabilitar"
+        print_info "  launchctl load ~/Library/LaunchAgents/com.story-api.plist    # Habilitar"
+    fi
+    
+    print_info ""
+    print_info "Ou use o script de controle:"
+    if [[ "$OS" == "Darwin" ]]; then
+        print_info "  ~/bin/story-api-control start|stop|restart|status|logs"
+        print_info "  (ou apenas 'story-api-control' se ~/bin estiver no PATH)"
+    else
+        print_info "  story-api-control start|stop|restart|status|logs"
+    fi
+    print_info ""
+    print_info "O serviço será iniciado automaticamente na próxima reinicialização."
+    print_info ""
+    print_info "Serviços disponíveis após inicialização:"
+    print_info "  - Story API: http://localhost:7999"
+    print_info "  - Adminer: http://localhost:8080"
+    print_info "  - MySQL: localhost:3306"
+    print_info ""
+    
+    if [[ "$OS" == "Darwin" ]]; then
+        print_info "Logs do serviço (macOS):"
+        print_info "  - Saída: ~/Library/Logs/story-api.log"
+        print_info "  - Erros: ~/Library/Logs/story-api-error.log"
+    fi
+}
+
+# Executar função principal
+main "$@" 
